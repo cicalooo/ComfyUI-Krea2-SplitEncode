@@ -1,9 +1,15 @@
 """Krea2 identity-edit source patch (in-context VAE tokens).
 
-Vendored/adapted from mustyrocks_k2edit 1.3.0 (Apache-2.0).
-Original: https://github.com/lbouaraba/comfyui-krea2edit / mustyrocks pack.
-Used internally by Krea2 Encode when VAE + image(s) are connected.
+Vendored and adapted from comfyui-krea2edit 1.3.0 by lbouaraba ("Mustyrocks"),
+Apache-2.0: https://github.com/lbouaraba/comfyui-krea2edit
+
+Changes from upstream: exposed as the internal function ``apply_identity_edit``
+(no standalone node), pixel path only (no source-latent input), ``logging`` instead
+of ``print``, and attention-bias cache keys built from mask content instead of
+``id()``.
 """
+import hashlib
+import logging
 import math
 
 import torch
@@ -20,6 +26,19 @@ from comfy.ldm.flux.layers import timestep_embedding
 # session cycling resolutions/prompts stays bounded instead of accumulating stale
 # GPU tensors (the attention bias alone is ~L^2 x 2 bytes — ~450MB at 1776x1184).
 _FWD_CACHE_MAX = 8
+
+log = logging.getLogger("krea2_split_encode")
+
+
+def mask_signature(mask):
+    """Stable content fingerprint for a MASK (None stays None).
+
+    Used in cache keys; ``id()`` can be reused by a new tensor after GC.
+    """
+    if mask is None:
+        return None
+    t = mask.detach().float().cpu().contiguous()
+    return (tuple(t.shape), hashlib.sha1(t.numpy().tobytes()).hexdigest())
 
 
 def _imgids(bs, frame, h_, w_, device):
@@ -77,7 +96,7 @@ def _encode_vae_fallback(vae, img):
     except RuntimeError as e:
         if "out of memory" not in str(e).lower():
             raise
-        print(f"[krea2edit] VAE encode OOM at {tuple(img.shape)} — retrying tiled", flush=True)
+        log.warning(f"VAE encode OOM at {tuple(img.shape)} — retrying tiled")
         torch.cuda.empty_cache()
         if hasattr(vae, "encode_tiled"):          # current ComfyUI (VAE in comfy/sd.py)
             return vae.encode_tiled(img)
@@ -93,7 +112,7 @@ def _fit_encode_image(image, vae, H, W, cache, key, fit_mode="crop"):
     key = key + (fit_mode,)
     if key in cache:
         return cache[key]
-    print(f"[krea2edit] _fit_encode_image: mode={fit_mode} in={tuple(image.shape)} target_latent={H}x{W}", flush=True)
+    log.debug(f"_fit_encode_image: mode={fit_mode} in={tuple(image.shape)} target_latent={H}x{W}")
     px_h, px_w = H * 8, W * 8
     img = image.movedim(-1, 1)  # B,H,W,C -> B,C,H,W
     ih, iw = img.shape[-2:]
@@ -104,9 +123,9 @@ def _fit_encode_image(image, vae, H, W, cache, key, fit_mode="crop"):
         # centered offset (scaled-pos with s=1 -> stride 1, no rounding artifacts).
         sc = min(px_h / ih, px_w / iw)
         if sc < 0.5:
-            print(f"[krea2edit] WARNING: source is smaller than the target grid "
+            log.warning(f"source is smaller than the target grid "
                   f"(upscaled x{1 / sc:.1f}) — outside the trained range; expect degraded "
-                  f"fidelity.", flush=True)
+                  f"fidelity.")
         # NEAR-MATCHED AR: fill the target grid EXACTLY via a minimal center-crop.
         # Fit-inside margins of 1-2 tokens are not harmless: target edge columns
         # with no ref correspondence get filled by repeating adjacent ref content
@@ -144,9 +163,9 @@ def _fit_encode_image(image, vae, H, W, cache, key, fit_mode="crop"):
     # crop (default / "v1 legacy"): center-crop to the target AR, then resize.
     s = max(px_h / ih, px_w / iw)
     if s > 2.0:
-        print(f"[krea2edit] WARNING: source is smaller than the target grid "
+        log.warning(f"source is smaller than the target grid "
               f"(upscaled x{s:.1f}) — outside the trained range; expect degraded "
-              f"fidelity.", flush=True)
+              f"fidelity.")
     ch, cw = min(ih, int(round(px_h / s))), min(iw, int(round(px_w / s)))
     y0, x0 = (ih - ch) // 2, (iw - cw) // 2
     img = img[..., y0:y0 + ch, x0:x0 + cw]
@@ -197,7 +216,8 @@ def _ref_attn_bias(boosts, boost_masks, txtlen, slens, tgtlen, mask_hw, device, 
 def krea2_edit_forward(m, x, timesteps, context, src_latent, transformer_options,
                        ref_boost=1.0, ref_boost_a=1.0, ref_boost_mask=None,
                        ref_boost_mask_a=None, ref_native=False, pos_mode="anchor",
-                       fwd_cache=None, ref_boosts=None, ref_boost_masks=None):
+                       fwd_cache=None, ref_boosts=None, ref_boost_masks=None,
+                       mask_sigs=None):
     """Krea2 SingleStreamDiT._forward, but with source block(s) prepended.
 
     m           : the SingleStreamDiT (LoRA-patched at sample time)
@@ -235,8 +255,8 @@ def krea2_edit_forward(m, x, timesteps, context, src_latent, transformer_options
     srcs_raw = [_to_4d(sl) for sl in src_list]
 
     if bs > 1 and any(s.shape[0] == 1 for s in srcs_raw) and "batch_broadcast" not in warned:
-        print("[krea2edit] WARNING: batch size > 1 but only one source image given — "
-              "every target in the batch will use the SAME reference.", flush=True)
+        log.warning("batch size > 1 but only one source image given — "
+              "every target in the batch will use the SAME reference.")
         warned["batch_broadcast"] = True
 
     # The cache outlives a single sampling run (the wrapper holds it for the node's
@@ -276,7 +296,7 @@ def krea2_edit_forward(m, x, timesteps, context, src_latent, transformer_options
                 msg = f"[krea2edit] LATENT-PATH fit_src (crop): src={tuple(src.shape[-2:])} -> {H}x{W}"
                 if scale > 2.0:
                     msg += " — source upscaled >2x (outside the trained range; consider the pixel path: connect vae + source_image)"
-                print(msg, flush=True)
+                log.info(msg)
                 src = _fit_src(src, H, W).to(x.dtype)
             srcs.append(comfy.ldm.common_dit.pad_to_patch_size(src, (patch, patch), padding_mode="replicate"))
         if fwd_cache is not None:
@@ -315,7 +335,7 @@ def krea2_edit_forward(m, x, timesteps, context, src_latent, transformer_options
         freqs = fwd_cache[freq_key]
     else:
         if pos_mode == "stride1" and ref_native:
-            print(f"[krea2edit] STRIDE1-POS fit: ref grids {src_grids} centered in ({h_},{w_})", flush=True)
+            log.debug(f"STRIDE1-POS fit: ref grids {src_grids} centered in ({h_},{w_})")
             warned["stride1"] = True
             ref_ids = [_imgids_offset(bs, i + 1, gh, gw, h_, w_, device)
                        for i, (gh, gw) in enumerate(src_grids)]
@@ -349,11 +369,13 @@ def krea2_edit_forward(m, x, timesteps, context, src_latent, transformer_options
             tag = f"ref{i + 1}"
             if mk is not None and boosts[i] != 1.0 and (mk > 0.5).sum() == 0 \
                     and f"mask_empty_{tag}" not in warned:
-                print(f"[krea2edit] WARNING: ref_boost_mask for {tag} has no active pixels "
-                      f"(>0.5) — the boost is a no-op.", flush=True)
+                log.warning(f"ref_boost_mask for {tag} has no active pixels "
+                      f"(>0.5) — the boost is a no-op.")
                 warned[f"mask_empty_{tag}"] = True
         bias_key = ("bias", tuple(boosts), txtlen, tuple(si.shape[1] for si in src_imgs),
-                    tgtlen, tuple(id(mk) for mk in masks))
+                    tgtlen,
+                    tuple(mask_sigs[:n]) if mask_sigs is not None and len(mask_sigs) >= n
+                    else tuple(mask_signature(mk) for mk in masks))
         if fwd_cache is not None and bias_key in fwd_cache:
             attn_bias = fwd_cache[bias_key]
         else:
@@ -381,185 +403,106 @@ def krea2_edit_forward(m, x, timesteps, context, src_latent, transformer_options
     return out
 
 
-class Krea2EditModelPatch:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {
-            "model": ("MODEL",),
-            "source_latent": ("LATENT",),
-        }, "optional": {
-            "source_latent_b": ("LATENT", {"tooltip": "2nd reference (subject photo) for multi-ref LoRAs -> RoPE frame=2, training-matched order: scene first, subject second"}),
-            "ref_boost": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.01, "round": 0.001,
-                                     "tooltip": "reference-fidelity dial: multiplies target->reference attention. Applies to the LAST ref (= the subject in two-ref workflows, the only ref in single-ref). 1.0 = off, >1 pulls harder toward the reference's appearance, <1 loosens. Optimal value is model-specific"}),
-            "ref_boost_a": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.01, "round": 0.001,
-                                       "tooltip": "same dial for the FIRST ref (= the scene in two-ref workflows). No effect in single-ref workflows. 1.0 = off"}),
-            "fit_mode": (["fit", "crop (legacy)"], {"default": "fit",
-                          "tooltip": "how an image source fits a mismatched output aspect ratio (needs vae + source_image connected): fit = resample the source to the target grid at a centered offset — matches how this model was trained (default, use this); crop (legacy) = center-crop to the target AR then resize (v1/v1.1 geometry, only for older weights)"}),
-            "ref_boost_mask": ("MASK", {"tooltip": "optional region on the (last) reference to boost, e.g. the face; empty = whole reference"}),
-            "ref_boost_mask_a": ("MASK", {"tooltip": "optional region on the FIRST reference to boost (the scene in two-ref workflows); empty = whole reference"}),
-            "vae": ("VAE", {"tooltip": "RECOMMENDED with source_image: enables the blur-proof pixel-space path (crop+resize in pixels, encode internally) — immune to input/output resolution mismatches"}),
-            "source_image": ("IMAGE", {"tooltip": "source as IMAGE (with vae connected): overrides source_latent with exact pixel-space fitting — fixes blurry results from mismatched resolutions"}),
-            "source_image_b": ("IMAGE", {"tooltip": "2nd reference as IMAGE (with vae)"}),
-            "target_latent": ("LATENT", {"tooltip": "the same latent that feeds KSampler.latent_image (e.g. EmptySD3LatentImage): pre-encodes the source at the exact target size BEFORE sampling, so the VAE is not pulled onto the GPU mid-sampling where it can evict part of the diffusion model and slow every remaining step"}),
-        }}
+def apply_identity_edit(model, *, vae, source_images, ref_boosts, ref_boost_masks=None,
+                        fit_mode="fit", target_latent=None):
+    """Return a clone of ``model`` with the Identity Edit in-context source path.
 
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "patch"
-    CATEGORY = "mustyrocks_k2edit"
-    DESCRIPTION = "Adds the krea2_edit in-context source-preservation path (source latent as frame=1 tokens) to a Krea2 model."
+    source_images : list of IMAGE tensors, DiT frame order (frame 1, frame 2, ...).
+    ref_boosts    : per-image target->ref attention multiplier (1.0 = off).
+    ref_boost_masks: per-image optional MASK restricting the boost.
+    The images are VAE-encoded with exact pixel-space fitting at the target size.
+    Pass ``target_latent`` (the KSampler latent) to encode before sampling.
+    """
+    if vae is None or not source_images:
+        raise ValueError("apply_identity_edit needs a VAE and at least one image")
+    m = model.clone()
 
-    def patch(self, model, source_latent, source_latent_b=None, ref_boost=1.0, ref_boost_a=1.0,
-              ref_boost_mask=None, ref_boost_mask_a=None, vae=None, source_image=None,
-              source_image_b=None, fit_mode="fit", target_latent=None,
-              source_images=None, ref_boosts=None, ref_boost_masks=None, **_future):
-        if _future:
-            print(f"[krea2edit] WARNING: workflow provides inputs this node version does not "
-                  f"know ({', '.join(sorted(_future))}). The workflow is newer than the "
-                  f"installed node pack. Update comfyui-krea2edit (Manager -> Update, or git "
-                  f"pull) and restart ComfyUI. Continuing without them.", flush=True)
-        m = model.clone()
+    _required = ("first", "last", "tmlp", "tproj", "txtfusion", "txtmlp",
+                 "pe_embedder", "blocks", "channels", "patch", "tdim", "_unpack_context")
+    dm0 = m.model
+    inner = getattr(dm0, "diffusion_model", None)
+    if inner is None:
+        inner = getattr(dm0, "model", None)
+    if inner is not None and all(hasattr(inner, a) for a in _required):
+        dm0 = inner
+    missing = [a for a in _required if not hasattr(dm0, a)]
+    if missing:
+        outer = type(m.model)
+        raise RuntimeError(
+            "Krea2 Split Encode: the connected model is not a Krea 2 SingleStreamDiT "
+            "({}.{}; missing {}). Connect Krea 2 Raw/Turbo with the Identity Edit LoRA."
+            .format(outer.__module__, outer.__name__, ", ".join(missing)))
 
-        # Fail fast with a clear message instead of an AttributeError on step 1.
-        # ComfyUI core support (commit 2a610155) wraps the raw SingleStreamDiT in a
-        # model-base class (comfy.model_base.Krea2); BaseModel stores the raw DiT at
-        # .diffusion_model, and that wrapper is what ModelPatcher.model holds at patch
-        # time. The sampling-time forward receives the RAW DiT (BaseModel._apply_model
-        # calls self.diffusion_model(...), whose own WrapperExecutor passes itself as
-        # class_obj), so validate that inner object; older ComfyUI hands us the raw
-        # DiT directly.
-        _required = ("first", "last", "tmlp", "tproj", "txtfusion", "txtmlp",
-                     "pe_embedder", "blocks", "channels", "patch", "tdim", "_unpack_context")
-        dm0 = m.model
-        inner = getattr(dm0, "diffusion_model", None)
-        if inner is None:
-            inner = getattr(dm0, "model", None)
-        if inner is not None and all(hasattr(inner, a) for a in _required):
-            dm0 = inner
-        missing = [a for a in _required if not hasattr(dm0, a)]
-        if missing:
-            outer = type(m.model)
-            where = f"{outer.__module__}.{outer.__name__}"
-            if dm0 is m.model and inner is not None:
-                # wrapper present but its raw model isn't a Krea2 DiT — name both
-                where += f" (raw diffusion model: {type(inner).__module__}.{type(inner).__name__})"
-            raise RuntimeError(
-                f"[krea2edit] the connected model is not a Krea 2 SingleStreamDiT — its inner "
-                f"model is {where}, missing attributes: {', '.join(missing)}. Connect a "
-                f"model ComfyUI loads as SingleStreamDiT (Krea 2 Raw/Turbo, Kroma, or a "
-                f"krea2 fine-tune), with the krea2_edit LoRA applied, to this node.")
+    existing = m.model_options.get("transformer_options", {}) \
+        .get("wrappers", {}).get(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, {}) \
+        .get("krea2_edit")
+    if existing:
+        raise RuntimeError(
+            "Krea2 Split Encode: this MODEL already carries an Identity Edit patch "
+            "(another Split Encode with a VAE, or Mustyrocks Krea2EditModelPatch). "
+            "Only one per model. For a CFG>1 negative, leave the negative encode's "
+            "vae disconnected and discard its MODEL output.")
 
-        # A second Krea2EditModelPatch downstream would otherwise silently overwrite
-        # this one (same wrapper key) — refuse instead.
-        existing = m.model_options.get("transformer_options", {}) \
-            .get("wrappers", {}).get(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, {}) \
-            .get("krea2_edit")
-        if existing:
-            raise RuntimeError(
-                "[krea2edit] the model already carries a krea2_edit patch — only one "
-                "Krea2EditModelPatch per graph is supported (a second one would silently "
-                "replace the first). Remove it or reconnect your graph.")
+    px_images = list(source_images)
+    boosts = [float(b) for b in ref_boosts]
+    masks = list(ref_boost_masks) if ref_boost_masks is not None else [None] * len(px_images)
+    mask_sigs = [mask_signature(mk) for mk in masks]
+    px_cache = {}
+    fwd_cache = {}
+    warned = {}
+    mm = m.model
 
-        # The target latent reaches the diffusion model already scaled (process_latent_in);
-        # scale the source(s) the same way so all share one latent space.
-        src_samples = model.model.process_latent_in(source_latent["samples"])
-        if source_latent_b is not None:
-            src_samples = [src_samples, model.model.process_latent_in(source_latent_b["samples"])]
+    if target_latent is not None:
+        Hh, Ww = target_latent["samples"].shape[-2], target_latent["samples"].shape[-1]
+        log.info("Identity Edit: pre-encoding %d source(s) at %dx%d px (fit_mode=%s)",
+                 len(px_images), Hh * 8, Ww * 8, fit_mode)
+        for i, img in enumerate(px_images):
+            _fit_encode_image(img, vae, Hh, Ww, px_cache, (i, Hh, Ww), fit_mode)
+    else:
+        log.info("Identity Edit: connect 'latent' (the KSampler latent) to VAE-encode before "
+                 "sampling; otherwise encoding happens on the first step and may evict "
+                 "part of the diffusion model.")
 
-        px_images = list(source_images) if source_images else []
-        if not px_images:
-            if source_image is not None:
-                px_images.append(source_image)
-            if source_image_b is not None:
-                px_images.append(source_image_b)
+    def wrapper(executor, x, timesteps, context, *wargs, **kwargs):
+        # Signature drift: old execute(x, t, ctx, attention_mask, transformer_options),
+        # new adds ref_latents. transformer_options is the trailing dict either way.
+        transformer_options = kwargs.pop("transformer_options", None)
+        if transformer_options is None:
+            transformer_options = {}
+            for a in reversed(wargs):
+                if isinstance(a, dict):
+                    transformer_options = a
+                    break
+        attn_mask = kwargs.get("attention_mask")
+        if attn_mask is None:
+            for a in wargs:
+                if not isinstance(a, dict):
+                    attn_mask = a
+                    break
+        if attn_mask is not None and "attn_mask" not in warned:
+            log.info("Identity Edit: upstream passed an attention_mask; it is ignored "
+                     "(native Krea2 _forward ignores it too).")
+            warned["attn_mask"] = True
+        dm = executor.class_obj
+        xx = _to_4d(x)
+        Hh, Ww = xx.shape[-2], xx.shape[-1]
+        lats = [
+            mm.process_latent_in(
+                _fit_encode_image(img, vae, Hh, Ww, px_cache, (i, Hh, Ww), fit_mode)
+            )
+            for i, img in enumerate(px_images)
+        ]
+        src = lats[0] if len(lats) == 1 else lats
+        return krea2_edit_forward(dm, x, timesteps, context, src, transformer_options,
+                                  ref_native=(fit_mode == "fit"),
+                                  pos_mode=("stride1" if fit_mode == "fit" else "anchor"),
+                                  fwd_cache=fwd_cache,
+                                  ref_boosts=boosts,
+                                  ref_boost_masks=masks,
+                                  mask_sigs=mask_sigs)
 
-        px_cache = {}   # pixel-path encoded sources, keyed per target resolution
-        fwd_cache = {}  # step-invariant forward work (fit/proj/freqs/bias) — see krea2_edit_forward
-        warned = {}     # once-only wrapper-level warnings
-        mm = model.model  # for process_latent_in on the pixel path
-
-        if fit_mode == "fit" and (vae is None or not px_images):
-            print(f"[krea2edit] WARNING: fit_mode='fit' has NO EFFECT — it needs both "
-                  f"'vae' and 'source_image' connected (the pixel path). Falling back to the "
-                  f"latent crop path.", flush=True)
-
-        # Pre-encode OUTSIDE the sampling window. vae.encode -> load_models_gpu ->
-        # free_memory(keep_loaded=[]), which partially unloads whatever is resident —
-        # including the diffusion model, if the first call lands inside the sampler.
-        # Nothing re-expands it (sampler_helpers loads once, before the loop), so the
-        # rest of the run streams weights from CPU every step. Running the encode here,
-        # at node-execution time, restores the ordinary VAEEncode -> KSampler order
-        # where the sampler evicts the VAE instead of the reverse.
-        if vae is not None and px_images:
-            if target_latent is not None:
-                Hh, Ww = target_latent["samples"].shape[-2], target_latent["samples"].shape[-1]
-                print(f"[krea2edit] pre-encoding sources at target {Hh * 8}x{Ww * 8}px "
-                      f"(before sampling, fit_mode={fit_mode})", flush=True)
-                for i, img in enumerate(px_images):
-                    _fit_encode_image(img, vae, Hh, Ww, px_cache, (i, Hh, Ww), fit_mode)
-            else:
-                print("[krea2edit] NOTE: connect 'target_latent' (the same latent that feeds "
-                      "KSampler.latent_image) to pre-encode the source here instead of on the "
-                      "first sampling step. Without it the VAE is loaded mid-sampling and can "
-                      "evict part of the diffusion model, slowing every remaining step.",
-                      flush=True)
-
-        def wrapper(executor, x, timesteps, context, *wargs, **kwargs):
-            # ComfyUI signature drift (2026-07-19, commit c9602625 adds ref_latents):
-            #   old: execute(x, t, ctx, attention_mask, transformer_options)
-            #   new: execute(x, t, ctx, attention_mask, ref_latents, transformer_options)
-            # Accept both: transformer_options is the trailing dict; any native
-            # ref_latents are ignored (this patch supplies its own source path).
-            transformer_options = kwargs.pop("transformer_options", None)
-            if transformer_options is None:
-                transformer_options = {}
-                for a in reversed(wargs):
-                    if isinstance(a, dict):
-                        transformer_options = a
-                        break
-            # attention_mask is the first non-dict positional after context (both the old
-            # and new signatures). Native _forward ignores it (txtfusion gets mask=None),
-            # so we do too — but say so ONCE if upstream ever starts passing a real one.
-            attn_mask = kwargs.get("attention_mask")
-            if attn_mask is None:
-                for a in wargs:
-                    if not isinstance(a, dict):
-                        attn_mask = a
-                        break
-            if attn_mask is not None and "attn_mask" not in warned:
-                print("[krea2edit] NOTE: upstream passed a non-None attention_mask; this node "
-                      "ignores it (native Krea2 _forward does the same — txtfusion uses "
-                      "mask=None). If you see artifacts, report it.", flush=True)
-                warned["attn_mask"] = True
-            dm = executor.class_obj  # the SingleStreamDiT instance
-            src = src_samples
-            if vae is not None and px_images:
-                if not px_cache:
-                    print(f"[krea2edit] pixel path ACTIVE (fit_mode={fit_mode})", flush=True)
-                xx = _to_4d(x)
-                Hh, Ww = xx.shape[-2], xx.shape[-1]
-                lats = [
-                    mm.process_latent_in(
-                        _fit_encode_image(img, vae, Hh, Ww, px_cache, (i, Hh, Ww), fit_mode)
-                    )
-                    for i, img in enumerate(px_images)
-                ]
-                src = lats[0] if len(lats) == 1 else lats
-            v = krea2_edit_forward(dm, x, timesteps, context, src, transformer_options,
-                                   ref_boost=ref_boost, ref_boost_a=ref_boost_a,
-                                   ref_boost_mask=ref_boost_mask,
-                                   ref_boost_mask_a=ref_boost_mask_a,
-                                   ref_native=(fit_mode == "fit" and vae is not None
-                                               and bool(px_images)),
-                                   pos_mode=("stride1" if fit_mode == "fit" else "anchor"),
-                                   fwd_cache=fwd_cache,
-                                   ref_boosts=ref_boosts,
-                                   ref_boost_masks=ref_boost_masks)
-            return v
-
-        to = m.model_options.setdefault("transformer_options", {})
-        comfy.patcher_extension.add_wrapper_with_key(
-            comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, "krea2_edit", wrapper, to
-        )
-        return (m,)
-
-
+    to = m.model_options.setdefault("transformer_options", {})
+    comfy.patcher_extension.add_wrapper_with_key(
+        comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, "krea2_edit", wrapper, to
+    )
+    return m
