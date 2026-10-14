@@ -1,8 +1,15 @@
-"""Krea 2 self-attention patch: per-token V scale and k-bias."""
+"""Krea 2 per-token V scale and key bias, applied through ComfyUI's ``attn1_patch`` hook.
+
+Native ``comfy.ldm.krea2.model.Attention.forward`` calls every ``attn1_patch`` with
+``(q, k, v, pe=, attn_mask=, extra_options=)`` after QK-norm and before RoPE, then runs
+``optimized_attention_masked`` with whatever mask the patch returns. Using the hook keeps
+the user's optimized attention backend (no ``attention_pytorch`` fallback) and avoids
+replacing ``attn.forward`` wholesale.
+"""
 
 from __future__ import annotations
 
-import types
+from typing import Optional, Sequence
 
 import torch
 
@@ -11,16 +18,18 @@ APPLY_TO_KEY = "krea2_weight_apply_to"
 
 
 def compose_attn_mask(existing, key_bias):
-    """Add Prompt Mix key bias onto an existing additive / bool attention mask.
+    """Add a key bias onto an existing additive / bool attention mask.
 
-    K2Edit ``ref_boost`` passes a (1, 1, L, L) additive mask into attn.forward.
-    Key bias is a per-key vector ``(1, L)``. They add (broadcast) instead of
-    replacing, so identity-edit fidelity and aux emphasis can coexist.
+    Identity Edit ``ref_boost`` passes a ``(1, 1, L, L)`` additive mask. Key bias is
+    ``(L,)``, ``(B, L)`` or ``(B, 1, 1, L)``. They add (broadcast) instead of replacing.
     """
     if key_bias is None:
         return existing
     if existing is None:
-        return key_bias
+        kb = key_bias
+        while kb.ndim < 4:
+            kb = kb.unsqueeze(-2) if kb.ndim >= 2 else kb.unsqueeze(0)
+        return kb
 
     e = existing
     if e.dtype == torch.bool:
@@ -29,78 +38,135 @@ def compose_attn_mask(existing, key_bias):
         e = e.masked_fill(~existing.bool(), fill)
 
     kb = key_bias.to(device=e.device, dtype=e.dtype)
-    # (1, L) -> (1, 1, L) -> (1, 1, 1, L) so it adds on the key axis of (1, 1, L, L).
+    if kb.ndim == 1:
+        kb = kb.unsqueeze(0)
     while kb.ndim < e.ndim:
-        if kb.ndim == 1:
-            kb = kb.unsqueeze(0)
-        else:
-            kb = kb.unsqueeze(-2)
+        kb = kb.unsqueeze(-2)
     return e + kb
 
 
-def _should_apply(transformer_options: dict) -> bool:
+def rows_to_apply(transformer_options: dict, batch: int) -> Optional[torch.Tensor]:
+    """Bool mask over batch rows that should be weighted, or ``None`` for all rows.
+
+    ComfyUI batches cond and uncond together; ``cond_or_uncond`` lists one entry per
+    equal-sized chunk (0 = cond, 1 = uncond). Only the requested chunks are weighted.
+    """
     apply_to = transformer_options.get(APPLY_TO_KEY, "cond")
-    if apply_to == "both":
-        return True
     cou = transformer_options.get("cond_or_uncond")
-    if cou is None:
+    if apply_to == "both" or not cou:
+        return None
+    want = 1 if apply_to == "uncond" else 0
+    n = len(cou)
+    if batch % n != 0:
+        # Unexpected layout: fall back to whole-batch decision (old behaviour).
+        return None if want in cou else torch.zeros(batch, dtype=torch.bool)
+    per = batch // n
+    flags = torch.tensor([c == want for c in cou], dtype=torch.bool)
+    return flags.repeat_interleave(per)
+
+
+def _should_apply(transformer_options: dict) -> bool:
+    """True when at least one batch chunk is selected by ``apply_to``."""
+    apply_to = transformer_options.get(APPLY_TO_KEY, "cond")
+    cou = transformer_options.get("cond_or_uncond")
+    if apply_to == "both" or not cou:
         return True
-    if apply_to == "uncond":
-        return 1 in cou
-    # cond
-    return 0 in cou
+    return (1 if apply_to == "uncond" else 0) in cou
 
 
-def krea2_attn_forward_weight(self, x, freqs=None, mask=None, transformer_options=None):
-    from einops import rearrange
-    from comfy.ldm.flux.math import apply_rope
-    from comfy.ldm.modules.attention import attention_pytorch, optimized_attention
+class TokenWeights:
+    """Precomputed index / factor tensors for weighted cond positions.
 
-    if transformer_options is None:
-        transformer_options = {}
+    Built once at node time from ``(pos, v_factor, k_bias)`` pairs, so the per-step
+    work is a couple of vectorised index ops instead of Python loops.
+    """
 
-    q, k, v, gate = self.wq(x), self.wk(x), self.wv(x), self.gate(x)
-    q = rearrange(q, "B L (H D) -> B H L D", H=self.heads)
-    k = rearrange(k, "B L (H D) -> B H L D", H=self.kvheads)
-    v = rearrange(v, "B L (H D) -> B H L D", H=self.kvheads)
+    def __init__(self, pairs: Sequence[tuple[int, float, float]]):
+        merged: dict[int, tuple[float, float]] = {}
+        for pos, vf, kb in pairs:
+            merged[int(pos)] = (float(vf), float(kb))
+        idx = sorted(merged)
+        self.pairs = [(i, merged[i][0], merged[i][1]) for i in idx]
+        self.idx = torch.tensor(idx, dtype=torch.long)
+        self.v = torch.tensor([merged[i][0] for i in idx], dtype=torch.float32)
+        self.kb = torch.tensor([merged[i][1] for i in idx], dtype=torch.float32)
+        self.has_v = bool((self.v != 1.0).any()) if idx else False
+        self.has_kb = bool((self.kb != 0.0).any()) if idx else False
+        self._dev: dict = {}
 
-    weights = transformer_options.get(WEIGHTS_KEY)
-    apply = bool(weights) and _should_apply(transformer_options)
-    if apply:
-        v = v.clone()
-        seq_v = v.shape[2]
-        for pos, v_factor, _ in weights:
-            if v_factor != 1.0 and 0 <= pos < seq_v:
-                v[:, :, pos] = v[:, :, pos] * v_factor
+    def __len__(self):
+        return len(self.pairs)
 
-    q, k = self.qknorm(q, k)
-    if freqs is not None:
-        q, k = apply_rope(q, k, freqs)
-    if self.kvheads != self.heads:
-        rep = self.heads // self.kvheads
-        k = k.repeat_interleave(rep, dim=1)
-        v = v.repeat_interleave(rep, dim=1)
+    def __iter__(self):
+        return iter(self.pairs)
 
-    bias = None
-    if apply and any(kb != 0.0 for _, _, kb in weights):
-        bias = q.new_zeros(1, k.shape[2])
-        seq_k = bias.shape[1]
-        for pos, _, kb in weights:
-            if kb != 0.0 and 0 <= pos < seq_k:
-                bias[:, pos] = kb
+    def __bool__(self):
+        return bool(self.pairs)
 
-    attn_mask = compose_attn_mask(mask, bias) if bias is not None else mask
+    def on(self, device):
+        key = str(device)
+        if key not in self._dev:
+            self._dev[key] = (self.idx.to(device), self.v.to(device), self.kb.to(device))
+        return self._dev[key]
+
+    def scale_vector(self, length: int, device, dtype) -> Optional[torch.Tensor]:
+        if not self.has_v:
+            return None
+        idx, v, _ = self.on(device)
+        keep = idx < length
+        s = torch.ones(length, device=device, dtype=dtype)
+        s[idx[keep]] = v[keep].to(dtype)
+        return s
+
+    def bias_vector(self, length: int, device, dtype) -> Optional[torch.Tensor]:
+        if not self.has_kb:
+            return None
+        idx, _, kb = self.on(device)
+        keep = idx < length
+        b = torch.zeros(length, device=device, dtype=dtype)
+        b[idx[keep]] = kb[keep].to(dtype)
+        return b
+
+
+def apply_token_weights(q, k, v, mask, weights: TokenWeights, transformer_options: dict):
+    """Return ``(v, mask)`` with weights applied to the selected batch rows."""
+    if not weights or not _should_apply(transformer_options):
+        return v, mask
+    B, _, L, _ = v.shape
+    rows = rows_to_apply(transformer_options, B)
+    if rows is not None:
+        rows = rows.to(v.device)
+        if not bool(rows.any()):
+            return v, mask
+    scale = weights.scale_vector(L, v.device, v.dtype)
+    if scale is not None:
+        s = scale.view(1, 1, L, 1)
+        if rows is not None:
+            s = torch.where(rows.view(B, 1, 1, 1), s, torch.ones_like(s))
+        v = v * s
+    bias = weights.bias_vector(k.shape[2], q.device, q.dtype)
     if bias is not None:
-        out = attention_pytorch(q, k, v, self.heads, mask=attn_mask, skip_reshape=True)
-    else:
-        # value_scale-only: keep the caller's mask (K2Edit ref_boost).
-        out = optimized_attention(
-            q, k, v, self.heads, mask=mask, skip_reshape=True,
-            transformer_options=transformer_options,
-        )
-    return self.wo(out * torch.sigmoid(gate))
+        kb = bias.view(1, 1, 1, -1).expand(B, 1, 1, -1)
+        if rows is not None:
+            kb = kb * rows.view(B, 1, 1, 1).to(kb.dtype)
+        mask = compose_attn_mask(mask, kb)
+    return v, mask
 
 
-class Krea2WeightPatch:
-    def __get__(self, obj, objtype=None):
-        return types.MethodType(krea2_attn_forward_weight, obj)
+def make_attn1_patch(weights: TokenWeights, apply_to: str, block_indices: Sequence[int]):
+    """Build an ``attn1_patch`` callable for ``ModelPatcher.set_model_attn1_patch``."""
+    blocks = frozenset(int(i) for i in block_indices)
+
+    def krea2_token_weight_patch(q, k, v, pe=None, attn_mask=None, extra_options=None):
+        opts = extra_options or {}
+        if opts.get("block_index") not in blocks:
+            return {}
+        if opts.get("block_type", "single") != "single":
+            return {}
+        local = dict(opts)
+        local[APPLY_TO_KEY] = apply_to
+        v2, mask2 = apply_token_weights(q, k, v, attn_mask, weights, local)
+        return {"v": v2, "attn_mask": mask2}
+
+    krea2_token_weight_patch.krea2_weights = weights
+    return krea2_token_weight_patch
