@@ -17,7 +17,7 @@ classifiers = [
 
 [project.urls]
 Repository = "https://github.com/cicalooo/ComfyUI-Krea2-SplitEncode"
-Documentation = "https://github.com/cicalooo/ComfyUI-Krea2-SplitEncode/blob/main/docs/reference.md"
+Documentation = "https://github.com/cicalooo/ComfyUI-Krea2-SplitEncode/blob/master/docs/reference.md"
 "Bug Tracker" = "https://github.com/cicalooo/ComfyUI-Krea2-SplitEncode/issues"
 
 [tool.comfy]
