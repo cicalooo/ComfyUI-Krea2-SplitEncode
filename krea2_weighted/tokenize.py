@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import logging
+import math
 from typing import Optional, Sequence
 
 import torch
+
+log = logging.getLogger("krea2_split_encode")
+
+# Qwen3-VL vision geometry as used by ComfyUI (comfy/text_encoders/qwen3vl.py):
+# patch 16, spatial merge 2 -> one LLM token per 32x32 pixel cell.
+QWEN_VL_PATCH = 16
+QWEN_VL_MERGE = 2
+QWEN_VL_FACTOR = QWEN_VL_PATCH * QWEN_VL_MERGE
+QWEN_VL_MIN_PIXELS = 3136
+QWEN_VL_MAX_PIXELS = 12845056
 
 # Qwen chat specials used by Krea 2's template.
 QWEN_IM_START = 151644
@@ -38,6 +50,53 @@ def is_image_marker(elem) -> bool:
     if isinstance(elem, (int, float)) and not isinstance(elem, bool):
         return int(elem) == QWEN_IMAGE_PAD
     return False
+
+
+def qwen_vl_resized_hw(height: int, width: int) -> tuple[int, int]:
+    """Mirror ``comfy.text_encoders.qwen_vl.process_qwen2vl_images`` resize for Qwen3-VL."""
+    f = QWEN_VL_FACTOR
+    h_bar = round(height / f) * f
+    w_bar = round(width / f) * f
+    if h_bar * w_bar > QWEN_VL_MAX_PIXELS:
+        beta = math.sqrt((height * width) / QWEN_VL_MAX_PIXELS)
+        h_bar = max(f, math.floor(height / beta / f) * f)
+        w_bar = max(f, math.floor(width / beta / f) * f)
+    elif h_bar * w_bar < QWEN_VL_MIN_PIXELS:
+        beta = math.sqrt(QWEN_VL_MIN_PIXELS / (height * width))
+        h_bar = math.ceil(height * beta / f) * f
+        w_bar = math.ceil(width * beta / f) * f
+    return max(f, h_bar), max(f, w_bar)
+
+
+def qwen_vl_image_tokens(height: int, width: int) -> int:
+    """LLM tokens one image expands to (after the 2x2 spatial merge)."""
+    h_bar, w_bar = qwen_vl_resized_hw(height, width)
+    return (h_bar // QWEN_VL_FACTOR) * (w_bar // QWEN_VL_FACTOR)
+
+
+def _extras_per_pad(image_ix, extra, image_token_counts):
+    """Expansion extras (tokens beyond the 1 placeholder) for each ``<|image_pad|>``.
+
+    With ``image_token_counts`` (one per image, from the prepared image sizes) each pad
+    gets its exact count. If the counts disagree with the observed expansion, or are
+    missing, fall back to an even split (only exact for equal-sized images).
+    """
+    n = len(image_ix)
+    out: dict[int, int] = {}
+    if not n or not extra:
+        return out
+    if image_token_counts is not None and len(image_token_counts) == n:
+        per = [max(0, int(c) - 1) for c in image_token_counts]
+        if sum(per) == extra:
+            return {j: per[k] for k, j in enumerate(image_ix)}
+        log.warning(
+            "Krea2 Split Encode: vision token counts %s do not match expansion (%d extra); "
+            "falling back to an even split", list(image_token_counts), extra,
+        )
+    base, rem = divmod(extra, n)
+    for k, j in enumerate(image_ix):
+        out[j] = base + (1 if k >= n - rem else 0)
+    return out
 
 
 def normalize_token_id(elem):
@@ -76,14 +135,22 @@ def parse_block_range(spec: str, n_blocks: int) -> list[int]:
         part = part.strip()
         if not part:
             continue
-        if "-" in part:
-            a, b = part.split("-", 1)
-            lo, hi = int(a), int(b)
-            if lo > hi:
-                lo, hi = hi, lo
-            out.extend(range(lo, hi + 1))
-        else:
-            out.append(int(part))
+        try:
+            if "-" in part:
+                a, b = part.split("-", 1)
+                lo, hi = int(a.strip()), int(b.strip())
+                if lo > hi:
+                    lo, hi = hi, lo
+                out.extend(range(lo, hi + 1))
+            else:
+                out.append(int(part))
+        except ValueError:
+            raise ValueError(
+                "block_range {!r}: could not read {!r}. Use 'all', a range like '0-27', "
+                "a list like '4,8,12', or a mix like '0-5,20-27' (blocks 0..{}).".format(
+                    spec, part, n_blocks - 1
+                )
+            ) from None
     seen = set()
     ordered = []
     for i in out:
@@ -210,6 +277,7 @@ def slice_to_cond_pairs_after_vision(
     cond_len: int,
     v_factor: float,
     k_bias: float,
+    image_token_counts: Optional[Sequence[int]] = None,
 ) -> list[tuple[int, float, float]]:
     """Map an unexpanded id span onto cond positions after vision-token expansion.
 
@@ -220,12 +288,7 @@ def slice_to_cond_pairs_after_vision(
     start, _ = user_span_from_ids(ids)
     extra = vision_expansion_extra(ids, cond_len)
     image_ix = [j for j, t in enumerate(ids) if t == QWEN_IMAGE_PAD]
-    extras_at: dict[int, int] = {}
-    n = len(image_ix)
-    if n and extra:
-        base, rem = divmod(extra, n)
-        for k, j in enumerate(image_ix):
-            extras_at[j] = base + (1 if k >= n - rem else 0)
+    extras_at = _extras_per_pad(image_ix, extra, image_token_counts)
 
     pairs: list[tuple[int, float, float]] = []
     acc_extra = 0
@@ -262,6 +325,7 @@ def vision_cond_pairs_per_image(
     cond_len: int,
     strengths: Sequence[float],
     emphasis_mode: str = "value_scale",
+    image_token_counts: Optional[Sequence[int]] = None,
 ) -> list[tuple[int, float, float]]:
     """Weight pairs for each image's expanded vision tokens.
 
@@ -274,12 +338,7 @@ def vision_cond_pairs_per_image(
     if not image_ix:
         return []
 
-    n = len(image_ix)
-    extras_at: dict[int, int] = {}
-    if extra:
-        base, rem = divmod(extra, n)
-        for k, j in enumerate(image_ix):
-            extras_at[j] = base + (1 if k >= n - rem else 0)
+    extras_at = _extras_per_pad(image_ix, extra, image_token_counts)
 
     pairs: list[tuple[int, float, float]] = []
     acc_extra = 0
@@ -291,7 +350,8 @@ def vision_cond_pairs_per_image(
                 s = float(strengths[pad_idx])
                 v_factor, k_bias = mix_factors(s, emphasis_mode)
                 if abs(v_factor - 1.0) > 1e-6 or abs(k_bias) > 1e-6:
-                    for e in range(n_extra):
+                    # placeholder slot + its expansion extras
+                    for e in range(n_extra + 1):
                         cp = (i - start) + acc_extra + e
                         if 0 <= cp < cond_len:
                             pairs.append((cp, v_factor, k_bias))

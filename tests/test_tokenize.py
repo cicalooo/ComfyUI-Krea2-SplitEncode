@@ -1,7 +1,4 @@
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from krea2_weighted.tokenize import (
     QWEN_IM_END,
@@ -84,3 +81,35 @@ def test_aux_id_span_grounded_skips_vision():
     ids_comb = prefix + main_user + aux_user + suffix
     s, e = aux_id_span_grounded(ids_comb, ids_main)
     assert list(ids_comb[s:e]) == aux_user
+
+
+def test_parse_block_range_bad_input_message():
+    import pytest
+
+    with pytest.raises(ValueError, match="block_range 'a-b'"):
+        parse_block_range("a-b", 28)
+    with pytest.raises(ValueError, match="selected no blocks"):
+        parse_block_range("40-50", 28)
+
+
+def test_qwen_vl_token_counts_match_comfy_processor():
+    from krea2_weighted.tokenize import qwen_vl_image_tokens, qwen_vl_resized_hw
+
+    assert qwen_vl_resized_hw(768, 512) == (768, 512)
+    assert qwen_vl_image_tokens(768, 512) == 24 * 16
+    assert qwen_vl_image_tokens(32, 32) == 4  # min_pixels upscales to 64x64
+    assert qwen_vl_resized_hw(70, 45) == (96, 64)  # below min_pixels -> upscaled
+
+
+def test_vision_pairs_use_exact_counts_for_mixed_sizes():
+    from krea2_weighted.tokenize import QWEN_IMAGE_PAD, vision_cond_pairs_per_image
+
+    ids = [QWEN_IM_START, QWEN_USER, QWEN_NL, 151652, QWEN_IMAGE_PAD, 151653,
+           151652, QWEN_IMAGE_PAD, 151653, 10, QWEN_IM_END]
+    counts = [2, 6]
+    cond_len = (len(ids) - 3) + sum(c - 1 for c in counts)
+    pairs = vision_cond_pairs_per_image(ids, cond_len, [0.5, 1.0], image_token_counts=counts)
+    # first image tokens: cond positions 1..2 (after vision_start at 0)
+    assert [p[0] for p in pairs] == [1, 2]
+    pairs_b = vision_cond_pairs_per_image(ids, cond_len, [1.0, 0.5], image_token_counts=counts)
+    assert [p[0] for p in pairs_b] == list(range(5, 11))
