@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+## 2.0.0
+
+Pack renamed to **Krea2 Split Encode** (`comfyui-krea2-splitencode`). Needs ComfyUI >= 0.29.0.
+
+### Breaking
+- ComfyUI V3 node API (`comfy_entrypoint`); no `NODE_CLASS_MAPPINGS`. Node ids unchanged.
+- Removed Encode aliases `image` / `image_b` (use `scene` / `identity`).
+- Options renamed: `ref_a_*` / `ref_b_*` → `scene_*` / `identity_*`, `ref_boost_a` → `scene_ref_boost`,
+  `ref_boost_mask(_a)` → `identity_mask` / `scene_mask`. `ref_boost` capped at 10.
+- Grounding images snap to the Qwen3-VL 32 px grid (was 28 px, the Qwen2.5-VL grid).
+
+### Fixed
+- Vision strengths and the aux span were misplaced when images had different sizes
+  (guides 384 px vs identity 768 px): expansion tokens are now counted per image.
+- Vision strength missed the last token of each image.
+- `apply_to=cond` also weighted the uncond rows when ComfyUI batched cond+uncond.
+- Removed a wasted native-resolution VAE encode on every Identity Edit run.
+- Split Ref slot 1 used as identity now uses `identity_strength`, not the guide strength.
+- Attention-bias cache keyed on mask content instead of `id()`.
+- Clear error for malformed `block_range`.
+
+### Changed
+- Weighting runs through Krea 2's `attn1_patch` hook with precomputed index tensors;
+  key bias keeps the optimized attention backend instead of falling back to PyTorch attention.
+- Vendored Identity Edit is an internal function; logging instead of print.
+- Tooltips on every input; README rewritten; four core-only example workflows.
+- CI (pytest on CPU) and registry publish workflow.
+
 ## 1.0.0
 
 - Pack is **Krea2 Split Encode**. Node class IDs unchanged (`Krea2Encode`, `Krea2EncodeOptions`, `Krea2MultiRef`). Menu titles: Split Encode, Split Encode Options, Split Ref.

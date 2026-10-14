@@ -10,7 +10,7 @@ Identity Edit turns on when **VAE + a person image** are connected. There is no 
 
 **Images, no VAE.** Same sequence, plus Qwen3-VL vision tokens. No in-context latents. Debug says grounding only.
 
-**Person + VAE, no Split Ref.** Mustyrocks pixel path. Order is fixed: scene = frame 1, person = frame 2. Swapping them drops likeness. `ref_boost` (~4) is the person. Scene boost is `ref_boost_a` on Encode Options (default 1, off). Single image (person only) is the strongest likeness this LoRA has.
+**Person + VAE, no Split Ref.** Mustyrocks pixel path. Order is fixed: scene = frame 1, person = frame 2. Swapping them drops likeness. `ref_boost` (~4) is the person. Scene boost is `scene_ref_boost` on Split Encode Options (default 1, off). Single image (person only) is the strongest likeness this LoRA has.
 
 **Person + VAE + Split Ref.** DiT is the person only, boost 4. Scene is Qwen-only. Guides are Qwen-only. The LoRA was trained for one ref, or scene-then-person. A third VAE frame, or a scene frame fitted onto the output while clothes are also in the tower, overwrites the face. Clothes still place because Qwen sees them.
 
@@ -20,7 +20,7 @@ Qwen order with guides: scene, then guides, then **person last**, so the instruc
 - Guide: clothing or object only, do not copy any person.
 - Person: this is the only person; preserve this face.
 
-If Split Ref is connected and Encode has no person, slot 1 is identity and the rest are guides. Do not use that if `identity` or `image_b` is already connected.
+If Split Ref is connected and Encode has no person, slot 1 is identity and the rest are guides. It uses `identity_strength` / `identity_focus` from Options (the guide's own focus text is kept if `identity_focus` is empty).
 
 ## Aux
 
@@ -41,14 +41,13 @@ Do not `ConditioningConcat` two Krea 2 encodes. Each already has the chat templa
 
 | Socket | Role |
 |---|---|
-| `identity` | Person. VAE appearance ref. Prefer this over `image_b`. |
+| `identity` | Person. VAE appearance ref. |
 | `scene` | Optional layout. VAE frame 1 only when no guides are connected. |
-| `image` / `image_b` | Aliases for scene / identity. Named sockets win. |
 | `vae` | Qwen Image VAE. Pixel-path encode. Ignored for text-only. |
-| `ref_boost` | Person likeness. 1 = off, ~4 start, >10 often over-copies. Ignored without VAE. |
+| `ref_boost` | Person likeness. 1 = off, ~4 start, capped at 10. Ignored without VAE. |
 | `latent` | Same empty latent as `KSampler.latent_image`. Optional. Skipped, the VAE can load mid-sample and some cards hitch every step. |
 | `refs` | Split Ref output. Does not replace identity. |
-| `options` | Encode Options. Disconnected = defaults. |
+| `options` | Split Encode Options. Disconnected = defaults. |
 
 Guide grounding defaults to **384**. Identity and scene stay at **768**. Higher grounding holds likeness and can duplicate the subject if you go far above the trained range. Lower grounding makes edits obey harder.
 
@@ -61,12 +60,12 @@ Guide grounding defaults to **384**. Identity and scene stay at **768**. Higher 
 | `block_range` | all | `0-27` or `4,8,12` if the mix is too strong. |
 | `apply_to` | cond | CFG 1 has no uncond pass. |
 | `separator` | newline | How prompt and aux are joined. |
-| `grounding_px` | 768 | Cap for scene and identity. 0 = native. |
+| `grounding_px` | 768 | Cap for scene and identity, snapped to the 32 px Qwen3-VL grid. 0 = native size (still snapped). |
 | `guide_grounding_px` | 384 | Cap for Split Ref. |
-| `ref_a_strength` / `ref_b_strength` | 1 | Qwen vision strength for scene / person. |
-| `ref_a_focus` / `ref_b_focus` | empty | Overrides the automatic labels. |
-| `ref_boost_a` | 1 | Scene VAE likeness. No effect while guides force the scene off the DiT. |
-| `ref_boost_mask` / `_a` | empty | Region on the person / scene. Empty = whole image. |
+| `scene_strength` / `identity_strength` | 1 | Qwen vision strength for scene / person. |
+| `scene_focus` / `identity_focus` | empty | Overrides the automatic labels. |
+| `scene_ref_boost` | 1 | Scene VAE likeness. No effect while guides force the scene off the DiT. |
+| `identity_mask` / `scene_mask` | empty | Region on the person / scene. Empty = whole image. |
 | `fit_mode` | fit | Training-matched. `crop (legacy)` only for older Identity Edit weights. |
 | `system_prompt` | empty | Replaces the Mustyrocks grounding system prompt. |
 
@@ -81,14 +80,14 @@ Wire both MODEL and CONDITIONING. LoRA first, this node last. Incompatible with 
 
 Generate at **≤2MP**. Above that, source content bleeds or subjects duplicate.
 
-At CFG > 1 the negative must be the trained unconditional: empty prompt, same images, **no VAE** on that second Encode. A second VAE tries to install another `krea2_edit` wrapper and errors. Throw away that node's MODEL.
+At CFG > 1 the negative must be the trained unconditional: empty prompt, same images, **no VAE** on that second Encode. A second VAE tries to install another Identity Edit wrapper on the same model and errors. Throw away that node's MODEL.
 
 `latent` only tells the node the output size so the VAE runs before sampling. It is not a source encode.
 
 ## What this is not
 
 - Not a 5-ref Identity Edit. Frames above 2 were never trained. Guides exist so clothes can place without taking the person slot.
-- Not KJNodes `Krea2 Prompt Weight`. That node weights phrases inside one string. This node splits prompt and aux, and owns the edit path. Same V-scale / k-bias idea. Do not stack them on the same blocks.
+- Not KJNodes `Krea2 Prompt Weight`. That node weights phrases inside one string. This node splits prompt and aux, and owns the edit path. Same V-scale / k-bias idea, applied through the `attn1_patch` hook. Do not stack two weighting patches on the same blocks.
 - Not a second Mustyrocks patch. The pixel path is vendored (Apache-2.0, [comfyui-krea2edit](https://github.com/lbouaraba/comfyui-krea2edit) 1.3.0). One wrapper per model.
 
 ## Tests
@@ -96,5 +95,6 @@ At CFG > 1 the negative must be the trained unconditional: empty prompt, same im
 From the pack directory, no GPU:
 
 ```bash
-python -m pytest tests -q
+# pure-logic tests need only torch; V3 node and Identity Edit tests also need a ComfyUI checkout
+COMFYUI_PATH=/path/to/ComfyUI python -m pytest tests -q
 ```
