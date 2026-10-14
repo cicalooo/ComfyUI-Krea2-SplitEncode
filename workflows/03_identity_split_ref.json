@@ -1,0 +1,772 @@
+{
+ "id": "39335937-df9a-5c97-8f9a-cb038acf6e85",
+ "revision": 0,
+ "last_node_id": 14,
+ "last_link_id": 16,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "UNETLoader",
+   "pos": [
+    20,
+    0
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      1
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "UNETLoader"
+   },
+   "widgets_values": [
+    "krea2_turbo.safetensors",
+    "default"
+   ]
+  },
+  {
+   "id": 2,
+   "type": "CLIPLoader",
+   "pos": [
+    20,
+    160
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      2
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CLIPLoader"
+   },
+   "widgets_values": [
+    "qwen3vl_4b_fp8_scaled.safetensors",
+    "krea2",
+    "default"
+   ]
+  },
+  {
+   "id": 3,
+   "type": "VAELoader",
+   "pos": [
+    20,
+    320
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      5,
+      15
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAELoader"
+   },
+   "widgets_values": [
+    "qwen_image_vae.safetensors"
+   ]
+  },
+  {
+   "id": 4,
+   "type": "LoraLoaderModelOnly",
+   "pos": [
+    360,
+    0
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 1
+    }
+   ],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      3
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "LoraLoaderModelOnly"
+   },
+   "widgets_values": [
+    "krea2_identity_edit.safetensors",
+    1.0
+   ]
+  },
+  {
+   "id": 5,
+   "type": "EmptySD3LatentImage",
+   "pos": [
+    20,
+    460
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      6,
+      13
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "EmptySD3LatentImage"
+   },
+   "widgets_values": [
+    1024,
+    1024,
+    1
+   ]
+  },
+  {
+   "id": 6,
+   "type": "LoadImage",
+   "pos": [
+    360,
+    460
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      4
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "MASK",
+     "type": "MASK",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "LoadImage"
+   },
+   "widgets_values": [
+    "person.png",
+    "image"
+   ],
+   "title": "Person (identity)"
+  },
+  {
+   "id": 7,
+   "type": "Krea2Encode",
+   "pos": [
+    720,
+    0
+   ],
+   "size": [
+    380,
+    320
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 2
+    },
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 3
+    },
+    {
+     "name": "identity",
+     "type": "IMAGE",
+     "link": 4
+    },
+    {
+     "name": "scene",
+     "type": "IMAGE",
+     "link": null
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 5
+    },
+    {
+     "name": "latent",
+     "type": "LATENT",
+     "link": 6
+    },
+    {
+     "name": "options",
+     "type": "KREA2_ENCODE_OPTS",
+     "link": null
+    },
+    {
+     "name": "refs",
+     "type": "KREA2_REFS",
+     "link": 8
+    },
+    {
+     "name": "prompt",
+     "type": "STRING",
+     "widget": {
+      "name": "prompt"
+     },
+     "link": null
+    },
+    {
+     "name": "aux",
+     "type": "STRING",
+     "widget": {
+      "name": "aux"
+     },
+     "link": null
+    },
+    {
+     "name": "aux_strength",
+     "type": "FLOAT",
+     "widget": {
+      "name": "aux_strength"
+     },
+     "link": null
+    },
+    {
+     "name": "ref_boost",
+     "type": "FLOAT",
+     "widget": {
+      "name": "ref_boost"
+     },
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "links": [
+      10
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "conditioning",
+     "type": "CONDITIONING",
+     "links": [
+      9,
+      11
+     ],
+     "slot_index": 1
+    },
+    {
+     "name": "debug",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 2
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "Krea2Encode"
+   },
+   "widgets_values": [
+    "Describe the image you want here.",
+    "",
+    0.45,
+    4.0
+   ]
+  },
+  {
+   "id": 8,
+   "type": "LoadImage",
+   "pos": [
+    20,
+    640
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      7
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "MASK",
+     "type": "MASK",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "LoadImage"
+   },
+   "widgets_values": [
+    "garment.png",
+    "image"
+   ],
+   "title": "Guide (clothing)"
+  },
+  {
+   "id": 9,
+   "type": "Krea2MultiRef",
+   "pos": [
+    360,
+    640
+   ],
+   "size": [
+    320,
+    360
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "image_1",
+     "type": "IMAGE",
+     "link": 7
+    },
+    {
+     "name": "image_2",
+     "type": "IMAGE",
+     "link": null
+    },
+    {
+     "name": "image_3",
+     "type": "IMAGE",
+     "link": null
+    },
+    {
+     "name": "image_4",
+     "type": "IMAGE",
+     "link": null
+    },
+    {
+     "name": "image_5",
+     "type": "IMAGE",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "refs",
+     "type": "KREA2_REFS",
+     "links": [
+      8
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "Krea2MultiRef"
+   },
+   "widgets_values": [
+    0.45,
+    "",
+    0.45,
+    "",
+    0.45,
+    "",
+    0.45,
+    "",
+    0.45,
+    ""
+   ]
+  },
+  {
+   "id": 10,
+   "type": "ConditioningZeroOut",
+   "pos": [
+    760,
+    420
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "conditioning",
+     "type": "CONDITIONING",
+     "link": 9
+    }
+   ],
+   "outputs": [
+    {
+     "name": "CONDITIONING",
+     "type": "CONDITIONING",
+     "links": [
+      12
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "ConditioningZeroOut"
+   }
+  },
+  {
+   "id": 11,
+   "type": "KSampler",
+   "pos": [
+    1100,
+    0
+   ],
+   "size": [
+    300,
+    260
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 10
+    },
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "link": 11
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "link": 12
+    },
+    {
+     "name": "latent_image",
+     "type": "LATENT",
+     "link": 13
+    }
+   ],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      14
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "KSampler"
+   },
+   "widgets_values": [
+    0,
+    "fixed",
+    10,
+    1.0,
+    "euler",
+    "simple",
+    1.0
+   ]
+  },
+  {
+   "id": 12,
+   "type": "VAEDecode",
+   "pos": [
+    1440,
+    0
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 11,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 14
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 15
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      16
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAEDecode"
+   }
+  },
+  {
+   "id": 13,
+   "type": "SaveImage",
+   "pos": [
+    1440,
+    160
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 12,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 16
+    }
+   ],
+   "outputs": [],
+   "properties": {
+    "Node name for S&R": "SaveImage"
+   },
+   "widgets_values": [
+    "krea2_split_encode"
+   ]
+  },
+  {
+   "id": 14,
+   "type": "Note",
+   "pos": [
+    20,
+    -260
+   ],
+   "size": [
+    560,
+    200
+   ],
+   "flags": {},
+   "order": 13,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "properties": {
+    "Node name for S&R": "Note"
+   },
+   "widgets_values": [
+    "Person + Split Ref: the person is the only VAE frame; the guide (clothing/object) is read by Qwen at ~0.45 strength. Describe what to do with the guide in the prompt."
+   ]
+  }
+ ],
+ "links": [
+  [
+   1,
+   1,
+   0,
+   4,
+   0,
+   "MODEL"
+  ],
+  [
+   2,
+   2,
+   0,
+   7,
+   0,
+   "CLIP"
+  ],
+  [
+   3,
+   4,
+   0,
+   7,
+   1,
+   "MODEL"
+  ],
+  [
+   4,
+   6,
+   0,
+   7,
+   2,
+   "IMAGE"
+  ],
+  [
+   5,
+   3,
+   0,
+   7,
+   4,
+   "VAE"
+  ],
+  [
+   6,
+   5,
+   0,
+   7,
+   5,
+   "LATENT"
+  ],
+  [
+   7,
+   8,
+   0,
+   9,
+   0,
+   "IMAGE"
+  ],
+  [
+   8,
+   9,
+   0,
+   7,
+   7,
+   "KREA2_REFS"
+  ],
+  [
+   9,
+   7,
+   1,
+   10,
+   0,
+   "CONDITIONING"
+  ],
+  [
+   10,
+   7,
+   0,
+   11,
+   0,
+   "MODEL"
+  ],
+  [
+   11,
+   7,
+   1,
+   11,
+   1,
+   "CONDITIONING"
+  ],
+  [
+   12,
+   10,
+   0,
+   11,
+   2,
+   "CONDITIONING"
+  ],
+  [
+   13,
+   5,
+   0,
+   11,
+   3,
+   "LATENT"
+  ],
+  [
+   14,
+   11,
+   0,
+   12,
+   0,
+   "LATENT"
+  ],
+  [
+   15,
+   3,
+   0,
+   12,
+   1,
+   "VAE"
+  ],
+  [
+   16,
+   12,
+   0,
+   13,
+   0,
+   "IMAGE"
+  ]
+ ],
+ "groups": [],
+ "config": {},
+ "extra": {},
+ "version": 0.4
+}
