@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Minimal README; details moved to `docs/reference.md`.
+- Example workflows moved to `example_workflows/` (ComfyUI template folder).
+- Removed the outdated `split-encode.png` screenshot.
+
 ## 2.0.0
 
 Pack renamed to **Krea2 Split Encode** (`comfyui-krea2-splitencode`). Needs ComfyUI >= 0.29.0.

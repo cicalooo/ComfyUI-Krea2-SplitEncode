@@ -1,6 +1,6 @@
 # Reference
 
-Details that do not belong on the README. Behavior matches the nodes, not the old Prompt Mix graph.
+Full inputs, behaviour and troubleshooting for Krea2 Split Encode.
 
 ## Paths
 
@@ -83,6 +83,51 @@ Generate at **≤2MP**. Above that, source content bleeds or subjects duplicate.
 At CFG > 1 the negative must be the trained unconditional: empty prompt, same images, **no VAE** on that second Encode. A second VAE tries to install another Identity Edit wrapper on the same model and errors. Throw away that node's MODEL.
 
 `latent` only tells the node the output size so the VAE runs before sampling. It is not a source encode.
+
+## Debug output
+
+- `aux id[a:b] → N cond tokens v=0.45` means N aux tokens were weighted. `0 aux tokens` is a warning: the prompt/aux split failed, so try another `separator`.
+- `vision: strengths=[…] → N cond tokens scaled` shows the per-image Qwen strengths.
+- `DiT refs=1 (identity) boosts=[4.0]` lists the Identity Edit frames. With guides you should see `scene is Qwen-only while guides are connected`.
+- `identity_edit=ON fit=fit` means the pixel path is active.
+- `patched blocks: [...]` shows which DiT blocks carry the weighting.
+
+## Troubleshooting
+
+- **"already carries an Identity Edit patch"**: two encodes with a VAE are feeding the same model. Disconnect the VAE from the negative encode, or remove a Mustyrocks `Krea2EditModelPatch` node.
+- **The face drifts**: a long aux text outweighs a short prompt. Lower `aux_strength`, set it to 0, or clear aux. Keep guide strengths around 0.45.
+- **Weighting does nothing**: the node's `model` output must feed the sampler.
+- **Slow steps with Identity Edit**: connect `latent` so the VAE encode runs before sampling.
+- **`block_range` error**: use `all`, `0-27`, `4,8,12` or `0-5,20-27`.
+- Don't combine with Krea2 Apply Regional, or with another token-weighting node on the same blocks.
+
+## Migrating
+
+**From 1.x.** Node ids are unchanged, so saved graphs still find the nodes, but some inputs were renamed or removed. Re-check the widget values after loading.
+
+| 1.x | 2.0 |
+|---|---|
+| `image` (Encode) | removed: use `scene` |
+| `image_b` (Encode) | removed: use `identity` |
+| `ref_a_strength` / `ref_b_strength` | `scene_strength` / `identity_strength` |
+| `ref_a_focus` / `ref_b_focus` | `scene_focus` / `identity_focus` |
+| `ref_boost_a` | `scene_ref_boost` |
+| `ref_boost_mask` / `ref_boost_mask_a` | `identity_mask` / `scene_mask` |
+| `ref_boost` max 1000 | max 10 |
+| `grounding_px` step 64 | step 32 (32 px Qwen3-VL grid) |
+
+**From 0.3 (Krea2 Prompt Mix).** Use Krea2 Split Encode: `text_main` → `prompt`, `text_aux` → `aux`, `image` → `scene`, `image_b` → `identity`.
+
+## Example workflows
+
+Core nodes only, in [`example_workflows/`](../example_workflows):
+
+| File | Shows |
+|---|---|
+| `01_text_mix.json` | Prompt + weighted aux text. No images. |
+| `02_identity_edit.json` | Person photo + VAE: keep the face. |
+| `03_identity_split_ref.json` | Person + a clothing guide through Split Ref. |
+| `04_cfg_negative.json` | CFG > 1 with the correct negative encode. |
 
 ## What this is not
 

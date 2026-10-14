@@ -461,7 +461,7 @@ def test_unknown_option_keys_are_ignored():
 
 
 def test_example_workflows_use_only_core_and_pack_nodes():
-    wf_dir = Path(__file__).resolve().parents[1] / "workflows"
+    wf_dir = Path(__file__).resolve().parents[1] / "example_workflows"
     files = sorted(wf_dir.glob("*.json"))
     assert len(files) >= 4
     core_nodes = {
