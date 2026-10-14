@@ -1,15 +1,14 @@
-"""ComfyUI-Krea2-WeightedConditioning.
+"""Krea2 Split Encode: ComfyUI V3 entry point.
 
-The folder name is not a valid Python identifier (hyphens), so ComfyUI loads
-this file by path. Pytest may import it the same way; fall back to an absolute
-import so unit tests still collect.
+ComfyUI loads this file by path (the folder name contains hyphens) and calls
+``comfy_entrypoint``. Pytest may import it directly; fall back to an absolute import.
 """
 
 try:
     from .krea2_weighted import __version__
-    from .krea2_weighted.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+    from .krea2_weighted.nodes import comfy_entrypoint
 except ImportError:
     from krea2_weighted import __version__
-    from krea2_weighted.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+    from krea2_weighted.nodes import comfy_entrypoint
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "__version__"]
+__all__ = ["comfy_entrypoint", "__version__"]
