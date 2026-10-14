@@ -1,0 +1,5 @@
+# Development-only files kept out of the registry archive.
+tests/
+.github/
+pytest.ini
+*.png

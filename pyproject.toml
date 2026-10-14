@@ -1,20 +1,29 @@
 [project]
-name = "comfyui-krea2-weightedconditioning"
-description = "Krea2 Split Encode: person as a VAE frame, scene and clothing as Qwen placement; prompt mix plus Identity Edit without source latents."
-version = "1.0.0"
+name = "comfyui-krea2-splitencode"
+description = "Krea 2 prompt encoding with a separately weighted aux/style text, Qwen3-VL image grounding, and Identity Edit (person as an in-context frame) in one node."
+version = "2.0.0"
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.10"
+# torch and einops ship with ComfyUI; no extra packages.
 dependencies = []
+keywords = ["comfyui", "krea", "krea2", "conditioning", "prompt-weighting", "identity", "qwen3-vl"]
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Environment :: GPU :: NVIDIA CUDA",
 ]
 
 [project.urls]
-Repository = "https://github.com/cicalooo/ComfyUI-Krea2-WeightedConditioning"
+Repository = "https://github.com/cicalooo/ComfyUI-Krea2-SplitEncode"
+Documentation = "https://github.com/cicalooo/ComfyUI-Krea2-SplitEncode/blob/main/docs/reference.md"
+"Bug Tracker" = "https://github.com/cicalooo/ComfyUI-Krea2-SplitEncode/issues"
 
 [tool.comfy]
 PublisherId = "cicalooo"
 DisplayName = "Krea2 Split Encode"
 Icon = ""
+includes = []
+# V3 node API and the Krea 2 attention attn1_patch hook.
+requires-comfyui = ">=0.29.0"
