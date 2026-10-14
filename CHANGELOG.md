@@ -28,7 +28,7 @@ Pack renamed to **Krea2 Split Encode** (`comfyui-krea2-splitencode`). Needs Comf
   key bias keeps the optimized attention backend instead of falling back to PyTorch attention.
 - Vendored Identity Edit is an internal function; logging instead of print.
 - Tooltips on every input; README rewritten; four core-only example workflows.
-- CI (pytest on CPU) and registry publish workflow.
+- CI (pytest on CPU).
 
 ## 1.0.0
 

@@ -19,11 +19,3 @@ classifiers = [
 Repository = "https://github.com/cicalooo/ComfyUI-Krea2-SplitEncode"
 Documentation = "https://github.com/cicalooo/ComfyUI-Krea2-SplitEncode/blob/master/docs/reference.md"
 "Bug Tracker" = "https://github.com/cicalooo/ComfyUI-Krea2-SplitEncode/issues"
-
-[tool.comfy]
-PublisherId = "cicalooo"
-DisplayName = "Krea2 Split Encode"
-Icon = ""
-includes = []
-# V3 node API and the Krea 2 attention attn1_patch hook.
-requires-comfyui = ">=0.29.0"

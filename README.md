@@ -23,7 +23,7 @@ Krea 2 reads prompts through Qwen3-VL, so the usual `(word:1.4)` weighting does 
 
 ## Install
 
-Use ComfyUI Manager or the registry (`comfy node install comfyui-krea2-splitencode`), or:
+Clone into `ComfyUI/custom_nodes`:
 
 ```bash
 cd ComfyUI/custom_nodes
